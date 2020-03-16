@@ -144,7 +144,6 @@ inline static int sparse_open_bands_count()
 inline static int sparse_close_bands()
 {
 	int r = 0;
-	LOG_ERROR("closing bands");
 	pthread_mutex_lock(&sparse_state.lru.lock);
 	while (sparse_open_bands_count() > 0) {
 		r = sparse_close_band(sparse_state.lru.bands_dl);
