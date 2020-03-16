@@ -1,0 +1,6 @@
+[submodule "yxml"]
+	path = yxml
+	url = https://g.blicky.net/yxml.git
+[submodule "uthash"]
+	path = uthash
+	url = https://github.com/troydhanson/uthash.git

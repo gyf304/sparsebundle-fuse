@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -e
+
+SIZE="134217728"
+BAND_SIZE="8388608"
+
+OPTIND=1
+while getopts "b:s:" opt; do
+	case "$opt" in
+	b) BAND_SIZE="$OPTARG"
+		;;
+	s) SIZE="$OPTARG"
+		;;
+	esac
+done
+
+if which numfmt > /dev/null; then
+	SIZE="$(numfmt --from=iec ${SIZE})"
+	BAND_SIZE="$(numfmt --from=iec ${BAND_SIZE})"
+fi
+
+OUT="${@:$OPTIND:1}"
+
+mkdir "$OUT"
+mkdir "$OUT/bands"
+
+cat << EOF > "$OUT/Info.plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+		<key>CFBundleInfoDictionaryVersion</key>
+		<string>6.0</string>
+		<key>band-size</key>
+		<integer>${BAND_SIZE}</integer>
+		<key>bundle-backingstore-version</key>
+		<integer>1</integer>
+		<key>diskimage-bundle-type</key>
+		<string>com.apple.diskimage.sparsebundle</string>
+		<key>size</key>
+		<integer>${SIZE}</integer>
+</dict>
+</plist>
+EOF
