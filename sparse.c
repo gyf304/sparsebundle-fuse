@@ -4,15 +4,12 @@
   This program can be distributed under the terms of the GNU GPLv2.
 */
 
-#define _GNU_SOURCE
-#include <stdio.h>
-#undef _GNU_SOURCE
-
 #define _POSIX_C_SOURCE 200809L
 
 #define FUSE_USE_VERSION 26
 
 #include <fuse.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
@@ -108,10 +105,10 @@ inline static struct sparse_band *sparse_open_band(int id, int write)
 	/* initialize band */
 	struct sparse_band *band = calloc(1, sizeof(*band));
 	band->index = id;
-	char *path = NULL;
-	asprintf(&path, "%s/bands/%x", sparse_options.path, id);
-	band->fd = eopen(path, O_RDWR | (write ? O_CREAT : 0), sparse_state.path_stat.st_mode & 0666);
-	free(path);
+	UT_string *path; utstring_new(path);
+	utstring_printf(path, "%s/bands/%x", sparse_options.path, id);
+	band->fd = eopen(utstring_body(path), O_RDWR | (write ? O_CREAT : 0), sparse_state.path_stat.st_mode & 0666);
+	utstring_free(path);
 	band->write = write;
 	pthread_rwlock_init(&band->rwlock, NULL);
 	HASH_ADD_INT(sparse_state.lru.bands_ht, index, band);
@@ -340,12 +337,10 @@ static int sparse_parse_info_plist(yxml_t *parser, FILE* f)
 {
 	UT_string *cur_key = NULL;
 	UT_string *cur_value = NULL;
-	int in_key = 0;
-	int in_value = 0;
 	int ret = 0;
+	int in_key = 0, in_value = 0;
+	int depth = 0, match = 1;
 	const char *dict_path[] = {"plist", "dict"};
-	int depth = 0;
-	int match = 1;
 	char c;
 	while (fread(&c, 1, 1, f)) {
 		yxml_ret_t r = yxml_parse(parser, c);
@@ -432,11 +427,11 @@ static int sparse_init()
 	}
 
 	const char *plist_name = "Info.plist";
-	char *plist_path = NULL;
-	(void) asprintf(&plist_path, "%s/%s", sparse_options.path, plist_name);
-	FILE* plist_file = fopen(plist_path, "r");
+	UT_string *plist_path = NULL; utstring_new(plist_path);
+	utstring_printf(plist_path, "%s/%s", sparse_options.path, plist_name);
+	FILE* plist_file = fopen(utstring_body(plist_path), "r");
 	if (plist_file == NULL) {
-		free(plist_path);
+		utstring_free(plist_path);
 		LOG_ERROR_FMT("unable to open %s", plist_name);
 		return 1;
 	}
@@ -446,7 +441,7 @@ static int sparse_init()
 	int plist_ret = sparse_parse_info_plist(yxml_parser, plist_file);
 	fclose(plist_file);
 	free(yxml_parser);
-	free(plist_path);
+	utstring_free(plist_path);
 	if (plist_ret) {
 		return 1;
 	}
