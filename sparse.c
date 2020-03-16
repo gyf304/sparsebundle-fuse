@@ -5,7 +5,6 @@
 */
 
 #define _POSIX_C_SOURCE 200809L
-
 #define FUSE_USE_VERSION 26
 
 #include <fuse.h>
@@ -28,6 +27,7 @@
 
 #define XML_BUFFER_SIZE (1 << 10)
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
+
 #define LOG_ERROR(x) (fprintf(stderr, "sparsebundle: %s\n", x))
 #define LOG_ERROR_FMT(f, ...) (fprintf(stderr, "sparsebundle: " f "\n", __VA_ARGS__))
 
@@ -188,6 +188,8 @@ inline static void sparse_release_band(struct sparse_band *band)
 
 static int sparse_getattr(const char *path, struct stat *stbuf)
 {
+	uid_t uid = getuid();
+	gid_t gid = getgid();
 	int res = 0;
 	memset(stbuf, 0, sizeof(struct stat));
 	if (strcmp(path, "/") == 0) {
@@ -195,16 +197,16 @@ static int sparse_getattr(const char *path, struct stat *stbuf)
 		stbuf->st_atime = sparse_state.path_stat.st_atime;
 		stbuf->st_mtime = sparse_state.path_stat.st_mtime;
 		stbuf->st_ctime = sparse_state.path_stat.st_ctime;
-		stbuf->st_uid = sparse_state.path_stat.st_uid;
-		stbuf->st_gid = sparse_state.path_stat.st_gid;
+		stbuf->st_uid = uid;
+		stbuf->st_gid = gid;
 		stbuf->st_nlink = 2;
 	} else if (strcmp(path+1, sparse_options.filename) == 0) {
 		stbuf->st_mode = S_IFREG | (0666 & sparse_state.path_stat.st_mode);
 		stbuf->st_atime = sparse_state.path_stat.st_atime;
 		stbuf->st_mtime = sparse_state.path_stat.st_mtime;
 		stbuf->st_ctime = sparse_state.path_stat.st_ctime;
-		stbuf->st_uid = sparse_state.path_stat.st_uid;
-		stbuf->st_gid = sparse_state.path_stat.st_gid;
+		stbuf->st_uid = uid;
+		stbuf->st_gid = gid;
 		stbuf->st_nlink = 1;
 		stbuf->st_size = sparse_info.size;
 	} else {
