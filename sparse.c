@@ -5,9 +5,7 @@
 */
 
 #define _POSIX_C_SOURCE 200809L
-#define FUSE_USE_VERSION 26
 
-#include <fuse.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -16,11 +14,14 @@
 #include <fcntl.h>
 #include <stddef.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 #include <yxml.h>
 #include <uthash.h>
 #include <utlist.h>
 #include <utstring.h>
+
+#include "sparse.h"
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
@@ -28,52 +29,32 @@
 #define XML_BUFFER_SIZE (1 << 10)
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
-#define LOG_ERROR(x) (fprintf(stderr, "sparsebundle: %s\n", x))
-#define LOG_ERROR_FMT(f, ...) (fprintf(stderr, "sparsebundle: " f "\n", __VA_ARGS__))
-
-static struct sparse_options {
-	const char *path;
-	const char *filename;
-	int max_open_bands;
-} sparse_options = {0};
-
-#define OPTION(t, p) \
-    { t, offsetof(struct sparse_options, p), 1 }
-
-static const struct fuse_opt option_spec[] = {
-	OPTION("--name=%s", filename),
-	OPTION("--max-open-bands=%d", max_open_bands),
-	FUSE_OPT_END
-};
-
-#define DEFAULT_FILENAME "sparsebundle.dmg"
-#define DEFAULT_MAX_OPEN_BANDS 16
-
-static struct sparse_info {
-	int band_size;
-	int size;
-	int bundle_backingstore_version;
-} sparse_info = {0};
-
 struct sparse_band {
 	int index;
 	/* either fd, or negative errno */
 	int fd;
-	int write;
 	pthread_rwlock_t rwlock;
 	UT_hash_handle hh;
 	struct sparse_band *prev;
 	struct sparse_band *next;
 };
 
-static struct sparse_state {
-	struct stat path_stat;
+struct sparse_info {
+	int band_size;
+	int size;
+	int bundle_backingstore_version;
+};
+
+struct sparse_state {
+	struct sparse_options options;
+	struct sparse_info info;
 	struct {
 		struct sparse_band *bands_dl;
 		struct sparse_band *bands_ht;
 		pthread_mutex_t lock;
 	} lru;
-} sparse_state = {0};
+	const char *error;
+};
 
 /* errno embedding version of posix functions */
 inline static int eopen(const char *path, int flags, int perm) {
@@ -100,31 +81,31 @@ inline static int epwrite(int fd, void *buf, size_t count, off_t offset)
 }
 
 /* locking lru.lock required */
-inline static struct sparse_band *sparse_open_band(int id, int write)
+inline static struct sparse_band *sparse_open_band(struct sparse_state *state, int id, int create)
 {
 	/* initialize band */
 	struct sparse_band *band = calloc(1, sizeof(*band));
 	band->index = id;
 	UT_string *path; utstring_new(path);
-	utstring_printf(path, "%s/bands/%x", sparse_options.path, id);
-	band->fd = eopen(utstring_body(path), O_RDWR | (write ? O_CREAT : 0), sparse_state.path_stat.st_mode & 0666);
+	utstring_printf(path, "%s/bands/%x", state->options.path, id);
+	band->fd = eopen(utstring_body(path), O_RDWR | (create ? O_CREAT : 0), 0666);
 	utstring_free(path);
-	band->write = write;
 	pthread_rwlock_init(&band->rwlock, NULL);
-	HASH_ADD_INT(sparse_state.lru.bands_ht, index, band);
-	DL_APPEND(sparse_state.lru.bands_dl, band);
+	HASH_ADD_INT(state->lru.bands_ht, index, band);
+	DL_APPEND(state->lru.bands_dl, band);
 	return band;
 }
 
 /* locking lru.lock required */
-inline static int sparse_close_band(struct sparse_band *band)
+inline static int sparse_close_band(struct sparse_state *state, struct sparse_band *band)
 {
 	int r = 0;
-	HASH_DEL(sparse_state.lru.bands_ht, band);
-	DL_DELETE(sparse_state.lru.bands_dl, band);
+	HASH_DEL(state->lru.bands_ht, band);
+	DL_DELETE(state->lru.bands_dl, band);
 	/* wait for operation to complete on the band */
 	pthread_rwlock_wrlock(&band->rwlock);
 	pthread_rwlock_unlock(&band->rwlock);
+	pthread_rwlock_destroy(&band->rwlock);
 	if (band->fd >= 0) {
 		r = close(band->fd);
 	}
@@ -133,117 +114,93 @@ inline static int sparse_close_band(struct sparse_band *band)
 }
 
 /* locking lru.lock required */
-inline static int sparse_open_bands_count()
+inline static int sparse_open_bands_count(struct sparse_state *state)
 {
-	return HASH_COUNT(sparse_state.lru.bands_ht);
+	return HASH_COUNT(state->lru.bands_ht);
 }
 
-inline static int sparse_close_bands()
+inline static int sparse_close_bands(struct sparse_state *state)
 {
 	int r = 0;
-	pthread_mutex_lock(&sparse_state.lru.lock);
-	while (sparse_open_bands_count() > 0) {
-		r = sparse_close_band(sparse_state.lru.bands_dl);
+	pthread_mutex_lock(&state->lru.lock);
+	while (sparse_open_bands_count(state) > 0) {
+		r = sparse_close_band(state, state->lru.bands_dl);
 		if (r < 0) {
 			break;
 		}
 	}
-	pthread_mutex_unlock(&sparse_state.lru.lock);
+	pthread_mutex_unlock(&state->lru.lock);
 	return r;
 }
 
-inline static struct sparse_band * sparse_get_band(int id, int write)
+inline static struct sparse_band *sparse_get_band(struct sparse_state *state, int id, int create)
 {
 	struct sparse_band *band = NULL;
-	pthread_mutex_lock(&sparse_state.lru.lock);
-	HASH_FIND_INT(sparse_state.lru.bands_ht, &id, band);
+	pthread_mutex_lock(&state->lru.lock);
+	HASH_FIND_INT(state->lru.bands_ht, &id, band);
 	if (band != NULL) {
 		/* band obtained */
-		if (write > band->write) {
-			/* reopen band for writing */
-			sparse_close_band(band);
-			band = sparse_open_band(id, write);
+		if (create && band->fd == -ENOENT) {
+			/* attempt to create band if not created yet. */
+			sparse_close_band(state, band);
+			band = sparse_open_band(state, id, create);
 		} else {
-			DL_DELETE(sparse_state.lru.bands_dl, band);
-			DL_APPEND(sparse_state.lru.bands_dl, band);
+			DL_DELETE(state->lru.bands_dl, band);
+			DL_APPEND(state->lru.bands_dl, band);
 		}
 	} else {
 		/* bind not found, time to open new bind. */
 		/* close band if length exceeded */
-		if (sparse_open_bands_count() >= sparse_options.max_open_bands) {
-			sparse_close_band(sparse_state.lru.bands_dl);
+		if (sparse_open_bands_count(state) >= state->options.max_open_bands) {
+			sparse_close_band(state, state->lru.bands_dl);
 		}
-		band = sparse_open_band(id, write);	
+		band = sparse_open_band(state, id, create);	
 	}
 	pthread_rwlock_rdlock(&band->rwlock);
-	pthread_mutex_unlock(&sparse_state.lru.lock);
+	pthread_mutex_unlock(&state->lru.lock);
 	return band;
 }
 
-inline static void sparse_release_band(struct sparse_band *band)
+inline static int sparse_clear_band(struct sparse_state *state, int id)
+{
+	int r = 0;
+	struct sparse_band *band = NULL;
+	pthread_mutex_lock(&state->lru.lock);
+	HASH_FIND_INT(state->lru.bands_ht, &id, band);
+	if (band == NULL) {
+		/* bind not found, time to open new bind. */
+		/* close band if length exceeded */
+		if (sparse_open_bands_count(state) >= state->options.max_open_bands) {
+			sparse_close_band(state, state->lru.bands_dl);
+		}
+		band = sparse_open_band(state, id, 0);
+	}
+	// removing the file
+	if (band->fd >= 0) {
+		if (close(band->fd)) {
+			r = -errno;
+		}
+		if (!r) {
+			band->fd = -ENOENT;
+			UT_string *path; utstring_new(path);
+			utstring_printf(path, "%s/bands/%x", state->options.path, id);
+			if (unlink(utstring_body(path))) {
+				r = -errno;
+			}
+			utstring_free(path);
+		}
+	}
+	pthread_mutex_unlock(&state->lru.lock);
+	return r;
+}
+
+inline static void sparse_release_band(struct sparse_state *state, struct sparse_band *band)
 {
 	assert(band != NULL);
 	pthread_rwlock_unlock(&band->rwlock);
 }
 
-static int sparse_getattr(const char *path, struct stat *stbuf)
-{
-	uid_t uid = getuid();
-	gid_t gid = getgid();
-	int res = 0;
-	memset(stbuf, 0, sizeof(struct stat));
-	if (strcmp(path, "/") == 0) {
-		stbuf->st_mode = S_IFDIR | (0555 & sparse_state.path_stat.st_mode);
-		stbuf->st_atime = sparse_state.path_stat.st_atime;
-		stbuf->st_mtime = sparse_state.path_stat.st_mtime;
-		stbuf->st_ctime = sparse_state.path_stat.st_ctime;
-		stbuf->st_uid = uid;
-		stbuf->st_gid = gid;
-		stbuf->st_nlink = 2;
-	} else if (strcmp(path+1, sparse_options.filename) == 0) {
-		stbuf->st_mode = S_IFREG | (0666 & sparse_state.path_stat.st_mode);
-		stbuf->st_atime = sparse_state.path_stat.st_atime;
-		stbuf->st_mtime = sparse_state.path_stat.st_mtime;
-		stbuf->st_ctime = sparse_state.path_stat.st_ctime;
-		stbuf->st_uid = uid;
-		stbuf->st_gid = gid;
-		stbuf->st_nlink = 1;
-		stbuf->st_size = sparse_info.size;
-	} else {
-		res = -ENOENT;
-	}
-	return res;
-}
-
-static int sparse_readdir(
-	const char *path, void *buf, fuse_fill_dir_t filler,
-	off_t offset, struct fuse_file_info *fi)
-{
-	(void) offset;
-	(void) fi;
-
-	if (strcmp(path, "/") != 0)
-		return -ENOENT;
-
-	filler(buf, ".", NULL, 0);
-	filler(buf, "..", NULL, 0);
-	filler(buf, sparse_options.filename, NULL, 0);
-
-	return 0;
-}
-
-static int sparse_open(const char *path, struct fuse_file_info *fi)
-{
-	if (strcmp(path+1, sparse_options.filename) != 0)
-		return -ENOENT;
-
-	if (fi->flags & O_CREAT || fi->flags & O_TRUNC)
-		return -EACCES;
-
-	return 0;
-}
-
-static int sparse_rw(void *buf, size_t count, off_t offset, int write)
+inline static int sparse_rw(struct sparse_state* state, void *buf, size_t count, off_t offset, int write)
 {
 	int acc = 0;
 	int r = 0;
@@ -254,10 +211,10 @@ static int sparse_rw(void *buf, size_t count, off_t offset, int write)
 		if (count == 0) {
 			break;
 		}
-		band_index = offset / sparse_info.band_size;
-		band_offset = MIN(offset % sparse_info.band_size, sparse_info.band_size);
-		band_count = MIN(sparse_info.band_size-band_offset, count);
-		band = sparse_get_band(band_index, write);
+		band_index = offset / state->info.band_size;
+		band_offset = MIN(offset % state->info.band_size, state->info.band_size);
+		band_count = MIN(state->info.band_size-band_offset, count);
+		band = sparse_get_band(state, band_index, write);
 		if (write) {
 			r = epwrite(band->fd, buf+acc, band_count, band_offset);
 		} else {
@@ -267,7 +224,7 @@ static int sparse_rw(void *buf, size_t count, off_t offset, int write)
 				r = band_count;
 			}
 		}
-		sparse_release_band(band);
+		sparse_release_band(state, band);
 		if (r < 0) {
 			return r;
 		}
@@ -278,65 +235,46 @@ static int sparse_rw(void *buf, size_t count, off_t offset, int write)
 	return acc;
 }
 
-static int sparse_read(
-	const char *path, char *buf,
-	size_t size, off_t offset,
-	struct fuse_file_info *fi
-)
+int sparse_pread(struct sparse_state *state, char *buf, size_t size, off_t offset)
 {
-	(void) fi;
-	if (strcmp(path+1, sparse_options.filename) != 0)
-		return -ENOENT;
-
-	return sparse_rw((void *)buf, size, offset, 0);
+	return sparse_rw(state, (void *)buf, size, offset, 0);
 }
 
-static int sparse_write(
-	const char *path, const char *buf,
-	size_t size, off_t offset,
-	struct fuse_file_info *fi
-)
+int sparse_pwrite(struct sparse_state *state, const char *buf, size_t size, off_t offset)
 {
-	(void) fi;
-	if (strcmp(path+1, sparse_options.filename) != 0)
-		return -ENOENT;
-
-	return sparse_rw((void *)buf, size, offset, 1);
+	return sparse_rw(state, (void *)buf, size, offset, 1);
 }
 
-static int sparse_flush(const char *path, struct fuse_file_info *fi)
+int sparse_trim(struct sparse_state *state, size_t size, off_t offset)
 {
-	(void) fi;
-	if (strcmp(path+1, sparse_options.filename) != 0)
-		return -ENOENT;
-
-	return sparse_close_bands();
-}
-
-static struct fuse_operations sparse_oper = {
-	.getattr	= sparse_getattr,
-	.readdir	= sparse_readdir,
-	.open		= sparse_open,
-	.read		= sparse_read,
-	.write		= sparse_write,
-	.flush		= sparse_flush,
-};
-
-static int sparse_opt_proc(void *data, const char *arg, int key, struct fuse_args *outargs)
-{
-	switch (key) {
-		case FUSE_OPT_KEY_NONOPT:
-			if (!sparse_options.path) {
-				sparse_options.path = arg;
-				return 0;
-			}
+	int r = 0;
+	int start_band = (offset + state->info.band_size - 1) / state->info.band_size;
+	int end_band = (offset + size) / state->info.band_size;
+	for (int i = start_band; i < end_band; i++) {
+		r = sparse_clear_band(state, i);
+		if (r < 0) {
 			break;
+		}
 	}
-	return 1;
+	return r;
 }
 
-static int sparse_parse_info_plist(yxml_t *parser, FILE* f)
+int sparse_flush(struct sparse_state *state)
 {
+	return sparse_close_bands(state);
+}
+
+size_t sparse_get_size(struct sparse_state* state) {
+	return state->info.size;
+}
+
+const char *sparse_get_error(struct sparse_state* state) {
+	return state->error;
+}
+
+static int sparse_parse_info_plist(struct sparse_state* state, yxml_t *parser, FILE* f)
+{
+	struct sparse_info* info = &state->info;
 	UT_string *cur_key = NULL;
 	UT_string *cur_value = NULL;
 	int ret = 0;
@@ -347,7 +285,7 @@ static int sparse_parse_info_plist(yxml_t *parser, FILE* f)
 	while (fread(&c, 1, 1, f)) {
 		yxml_ret_t r = yxml_parse(parser, c);
 		if (r < 0) {
-			LOG_ERROR("error while parsing plist");
+			state->error = "error while parsing plist";
 			ret = 1;
 			break;
 		}
@@ -369,11 +307,11 @@ static int sparse_parse_info_plist(yxml_t *parser, FILE* f)
 			case YXML_ELEMEND:
 				if (in_value) {
 					if (strcmp(utstring_body(cur_key), "band-size") == 0) {
-						sparse_info.band_size = atoi(utstring_body(cur_value));
+						info->band_size = atoi(utstring_body(cur_value));
 					} else if (strcmp(utstring_body(cur_key), "size") == 0) {
-						sparse_info.size = atoi(utstring_body(cur_value));
+						info->size = atoi(utstring_body(cur_value));
 					} else if (strcmp(utstring_body(cur_key), "bundle-backingstore-version") == 0) {
-						sparse_info.bundle_backingstore_version = atoi(utstring_body(cur_value));
+						info->bundle_backingstore_version = atoi(utstring_body(cur_value));
 					}
 				}
 				in_key = 0;
@@ -400,47 +338,59 @@ static int sparse_parse_info_plist(yxml_t *parser, FILE* f)
 	if (cur_value) {
 		utstring_free(cur_value);
 	}
-	if (sparse_info.bundle_backingstore_version != 1) {
-		LOG_ERROR("unsupported bundle-backingstore-version");
+	if (info->bundle_backingstore_version != 1) {
+		state->error = "unsupported bundle-backingstore-version";
 		ret = 1;
 	}
-	if (sparse_info.band_size <= 0) {
-		LOG_ERROR("unable to obtain a valid band-size");
+	if (info->band_size <= 0) {
+		state->error = "unable to obtain a valid band-size";
 		ret = 1;
 	}
-	if (sparse_info.size <= 0) {
-		LOG_ERROR("unable to obtain a valid size");
+	if (info->size <= 0) {
+		state->error = "unable to obtain a valid size";
 		ret = 1;
 	}
 	return ret;
 }
 
-static int sparse_init()
+int sparse_open(struct sparse_state **state_ptr, const struct sparse_options *options)
 {
-	sparse_options.max_open_bands = MAX(sparse_options.max_open_bands, 1);
-	if (sparse_options.path == NULL) {
-		LOG_ERROR("invalid path");
+	struct sparse_state *state = calloc(1, sizeof(struct sparse_state));
+	*state_ptr = state;
+
+	memcpy(&state->options, options, sizeof(struct sparse_options));
+	state->options.max_open_bands = MAX(state->options.max_open_bands, 1);
+	if (state->options.path == NULL) {
+		state->error = "invalid path";
 		return 1;
 	}
 
-	if (stat(sparse_options.path, &sparse_state.path_stat)) {
-		LOG_ERROR(strerror(errno));
+	struct stat bands_stat;
+	UT_string *bands_path = NULL; utstring_new(bands_path);
+	utstring_printf(bands_path, "%s/%s", state->options.path, "bands");
+	if (stat(utstring_body(bands_path), &bands_stat)) {
+		utstring_free(bands_path);
+		state->error = "cannot stat bands";
+		return 1;
+	}
+	utstring_free(bands_path);
+	if (!(bands_stat.st_mode & S_IFDIR)) {
+		state->error = "bands should be a directory";
 		return 1;
 	}
 
-	const char *plist_name = "Info.plist";
 	UT_string *plist_path = NULL; utstring_new(plist_path);
-	utstring_printf(plist_path, "%s/%s", sparse_options.path, plist_name);
+	utstring_printf(plist_path, "%s/%s", state->options.path, "Info.plist");
 	FILE* plist_file = fopen(utstring_body(plist_path), "r");
 	if (plist_file == NULL) {
 		utstring_free(plist_path);
-		LOG_ERROR_FMT("unable to open %s", plist_name);
+		state->error = "unable to open Info.plist";
 		return 1;
 	}
 
 	yxml_t *yxml_parser = malloc(sizeof(yxml_t) + XML_BUFFER_SIZE);;
 	yxml_init(yxml_parser, yxml_parser+1, XML_BUFFER_SIZE);
-	int plist_ret = sparse_parse_info_plist(yxml_parser, plist_file);
+	int plist_ret = sparse_parse_info_plist(state, yxml_parser, plist_file);
 	fclose(plist_file);
 	free(yxml_parser);
 	utstring_free(plist_path);
@@ -448,30 +398,16 @@ static int sparse_init()
 		return 1;
 	}
 
-	if (strstr(sparse_options.filename, "/") ||
-		strcmp(sparse_options.filename, ".") == 0 ||
-		strcmp(sparse_options.filename, "..") == 0) {
-		LOG_ERROR("invalid filename");
-		return 1;
-	}
-
-	pthread_mutex_init(&sparse_state.lru.lock, NULL);
+	pthread_mutex_init(&state->lru.lock, NULL);
 
 	return 0;
 }
 
-int main(int argc, char *argv[])
+int sparse_close(struct sparse_state **state_ptr)
 {
-	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	sparse_options.filename = strdup(DEFAULT_FILENAME);
-	sparse_options.max_open_bands = DEFAULT_MAX_OPEN_BANDS;
-	if (fuse_opt_parse(&args, &sparse_options, option_spec, sparse_opt_proc) == -1) {
-		return 1;
-	}
-
-	if (sparse_init()) {
-		return 1;
-	}
-
-	return fuse_main(args.argc, args.argv, &sparse_oper, NULL);
+	struct sparse_state *state = *state_ptr;
+	sparse_flush(state);
+	free(state);
+	*state_ptr = NULL;
+	return 0;
 }

@@ -1,2 +1,4 @@
-/sparse
+/sparse-fuse
 /.vscode
+*.o
+*.so
