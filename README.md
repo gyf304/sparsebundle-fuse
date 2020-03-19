@@ -42,12 +42,12 @@ make sparse-fuse
 3. Run `./sparse-fuse SPARSEBUNDLE MOUNTPOINT`
 4. There should be a `sparsebundle.dmg` file under `MOUNTPOINT`
 
-### mkfs.sparsebundle
+### mksparse
 
 This is a script for creating a sparsebundle.
 
 ```
-mkfs.sparsebundle [-s SIZE] [-b BLOCKSIZE] SPARSEBUNDLE
+mksparse [-s SIZE] [-b BLOCKSIZE] SPARSEBUNDLE
 
-mkfs.sparsebundle -s 1G ./test.sparsebundle
+mksparse -s 1G ./test.sparsebundle
 ```
