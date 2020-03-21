@@ -18,12 +18,10 @@ but you should use the system built-in Disk Utility instead of this.)
 ```sh
 git clone --recursive https://github.com/gyf304/sparsebundle-fuse.git
 cd sparsebundle-fuse
+autoreconf -i
+./configure
 # build everything
 make
-# build nbdkit plugin only
-make sparse-nbd.so
-# build fuse only
-make sparse-fuse
 ```
 
 ## Usage
