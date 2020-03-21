@@ -1,4 +1,11 @@
 lib_LTLIBRARIES = libsparsebundle.la
-libsparsebundle_la_SOURCES = sparsebundle.c $(top_srcdir)/yxml/yxml.c
-libsparsebundle_la_CFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/yxml -I$(top_srcdir)/uthash/src
-libsparsebundle_la_LDFLAGS = -static
+libsparsebundle_la_SOURCES = \
+	sparsebundle.c \
+	yxml.c \
+	yxml.h \
+	uthash.h \
+	utlist.h \
+	utstring.h
+libsparsebundle_la_CFLAGS = \
+	-I$(top_srcdir)/include
+libsparsebundle_la_LDFLAGS = -static -no-undefined -lpthread

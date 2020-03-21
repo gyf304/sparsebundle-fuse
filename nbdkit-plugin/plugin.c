@@ -65,7 +65,7 @@ static void *sparse_nbd_open(int readonly)
 static int64_t sparse_nbd_get_size (void *handle)
 {
 	size_t size = sparse_get_size((sparse_handle_t) handle);
-	nbdkit_debug("size is %llu", size);
+	nbdkit_debug("size is %lu", size);
 	return size;
 }
 
