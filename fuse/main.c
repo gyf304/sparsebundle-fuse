@@ -17,10 +17,14 @@
 
 #include "sparsebundle.h"
 
+#define xstr(s) str(s)
+#define str(s) #s
+
 #define DEFAULT_MAX_OPEN_BANDS 16
 
 static struct sparse_fuse_options {
     char *filename;
+	int show_help;
     struct sparse_options options;
 } sparse_fuse_options = {0};
 
@@ -31,6 +35,7 @@ static struct sparse_state *sparse_state = NULL;
 
 static const struct fuse_opt option_spec[] = {
 	OPTION("--name=%s", filename),
+	OPTION("--help", show_help),
 	OPTION("--max-open-bands=%d", options.max_open_bands),
 	FUSE_OPT_END
 };
@@ -133,6 +138,17 @@ static int sparse_opt_proc(void *data, const char *arg, int key, struct fuse_arg
 	return 1;
 }
 
+static void usage(const char *progname)
+{
+	printf(
+"usage: %s sparsebundle mountpoint [options]\n"
+"\n"
+"    -h   --help            print help\n"
+"    -f                     foreground operation\n"
+"    -s                     disable multi-threaded operation\n"
+"    --max-open-bands=N     maximum band files open (default: " xstr(DEFAULT_MAX_OPEN_BANDS) ")\n", progname);
+}
+
 int main(int argc, char *argv[])
 {
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
@@ -140,6 +156,11 @@ int main(int argc, char *argv[])
 	sparse_fuse_options.options.max_open_bands = DEFAULT_MAX_OPEN_BANDS;
 	if (fuse_opt_parse(&args, &sparse_fuse_options, option_spec, sparse_opt_proc) == -1) {
 		return 1;
+	}
+
+	if (sparse_fuse_options.show_help) {
+		usage(argv[0]);
+		return 0;
 	}
 
 	if (sparse_open(&sparse_state, &sparse_fuse_options.options)) {
