@@ -56,6 +56,61 @@ struct sparse_state {
 	const char *error;
 };
 
+#if defined(_WIN32) || defined(__MINGW32__) || defined(__CYGWIN__) || defined(_MSC_VER)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+ssize_t pread(int fd, void *buf, size_t count, long long offset)
+{
+	OVERLAPPED o = {0,0,0,0,0};
+	HANDLE fh = (HANDLE)_get_osfhandle(fd);
+	uint64_t off = offset;
+	DWORD bytes;
+	BOOL ret;
+
+	if (fh == INVALID_HANDLE_VALUE) {
+		errno = EBADF;
+		return -1;
+	}
+
+	o.Offset = off & 0xffffffff;
+	o.OffsetHigh = (off >> 32) & 0xffffffff;
+
+	ret = ReadFile(fh, buf, (DWORD)count, &bytes, &o);
+	if (!ret) {
+		errno = EIO;
+		return -1;
+	}
+
+	return (ssize_t)bytes;
+}
+
+ssize_t pwrite(int fd, const void *buf, size_t count, long long offset)
+{
+	OVERLAPPED o = {0,0,0,0,0};
+	HANDLE fh = (HANDLE)_get_osfhandle(fd);
+	uint64_t off = offset;
+	DWORD bytes;
+	BOOL ret;
+
+	if (fh == INVALID_HANDLE_VALUE) {
+		errno = EBADF;
+		return -1;
+	}
+
+	o.Offset = off & 0xffffffff;
+	o.OffsetHigh = (off >> 32) & 0xffffffff;
+
+	ret = WriteFile(fh, buf, (DWORD)count, &bytes, &o);
+	if (!ret) {
+		errno = EIO;
+		return -1;
+	}
+
+	return (ssize_t)bytes;
+}
+#endif
+
 /* errno embedding version of posix functions */
 inline static int eopen(const char *path, int flags, int perm) {
 	int fd = open(path, flags, perm);
