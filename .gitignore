@@ -15,6 +15,7 @@
 *.lo
 *.la
 *.so
+*.in
 .deps
 .libs
 Makefile
