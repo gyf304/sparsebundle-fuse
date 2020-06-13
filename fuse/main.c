@@ -23,15 +23,15 @@
 #define DEFAULT_MAX_OPEN_BANDS 16
 
 static struct sparse_fuse_options {
-    char *filename;
+	char *filename;
 	int show_help;
-    struct sparse_options options;
+	struct sparse_options options;
 } sparse_fuse_options = {0};
 
 static struct sparse_state *sparse_state = NULL;
 
 #define OPTION(t, p) \
-    { t, offsetof(struct sparse_fuse_options, p), 1 }
+	{ t, offsetof(struct sparse_fuse_options, p), 1 }
 
 static const struct fuse_opt option_spec[] = {
 	OPTION("--name=%s", filename),
@@ -94,26 +94,26 @@ static int sparse_fuse_open(const char *path, struct fuse_file_info *fi)
 
 static int sparse_fuse_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-    if (strcmp(path+1, sparse_fuse_options.filename) != 0)
+	if (strcmp(path+1, sparse_fuse_options.filename) != 0)
 		return -ENOENT;
 
-    return sparse_pread(sparse_state, buf, size, offset);
+	return sparse_pread(sparse_state, buf, size, offset);
 }
 
 static int sparse_fuse_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-    if (strcmp(path+1, sparse_fuse_options.filename) != 0)
+	if (strcmp(path+1, sparse_fuse_options.filename) != 0)
 		return -ENOENT;
 
-    return sparse_pwrite(sparse_state, buf, size, offset);
+	return sparse_pwrite(sparse_state, buf, size, offset);
 }
 
 static int sparse_fuse_flush(const char *path, struct fuse_file_info *fi)
 {
-    if (strcmp(path+1, sparse_fuse_options.filename) != 0)
+	if (strcmp(path+1, sparse_fuse_options.filename) != 0)
 		return -ENOENT;
 
-    return sparse_flush(sparse_state);
+	return sparse_flush(sparse_state);
 }
 
 static struct fuse_operations sparse_oper = {
@@ -164,7 +164,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (sparse_open(&sparse_state, &sparse_fuse_options.options)) {
-        fprintf(stderr, "sparsebundle: %s\n", sparse_get_error(sparse_state));
+		fprintf(stderr, "sparsebundle: %s\n", sparse_get_error(sparse_state));
 		return 1;
 	}
 
